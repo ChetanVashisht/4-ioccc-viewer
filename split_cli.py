@@ -9,6 +9,13 @@ import os
 from pathlib import Path
 from typing import Any
 import logging
+from rich.console import Console
+from rich.syntax import Syntax
+from rich.text import Text
+from rich.markdown import Markdown
+import html2text
+from PIL import Image
+import io
 
 # Set up logging
 logging.basicConfig(
@@ -38,10 +45,15 @@ class ContentView(ScrollableContainer):
         overflow-y: scroll;
         padding: 1 2;
         width: 70%;
+        background: $surface;
     }
     
     ContentView:focus {
         border-left: solid yellow;
+    }
+
+    ContentView > Static {
+        width: auto;
     }
     """
 
@@ -145,6 +157,43 @@ class ContentView(ScrollableContainer):
         tree.focus()
 
 
+def convert_image_to_ascii(image_path: str, max_width: int = 100) -> str:
+    """Convert an image to ASCII art."""
+    try:
+        # ASCII characters used to build the output text
+        ASCII_CHARS = "@%#*+=-:. "
+        
+        # Open the image
+        with Image.open(image_path) as img:
+            # Convert to grayscale
+            img = img.convert('L')
+            
+            # Calculate new dimensions while maintaining aspect ratio
+            aspect_ratio = img.height / img.width
+            new_width = min(max_width, img.width)
+            new_height = int(aspect_ratio * new_width * 0.5)  # * 0.5 to account for terminal character height
+            
+            # Resize image
+            img = img.resize((new_width, new_height))
+            
+            # Convert pixels to ASCII
+            pixels = img.getdata()
+            ascii_str = ''
+            for i, pixel in enumerate(pixels):
+                ascii_str += ASCII_CHARS[pixel * len(ASCII_CHARS) // 256]
+                if (i + 1) % new_width == 0:
+                    ascii_str += '\n'
+            
+            # Add image information
+            image_info = f"Image: {os.path.basename(image_path)}\n"
+            image_info += f"Original size: {img.width}x{img.height}\n"
+            image_info += f"ASCII representation:\n\n"
+            
+            return image_info + ascii_str
+    except Exception as e:
+        return f"Error converting image: {str(e)}"
+
+
 class FileTree(Tree):
     """Tree widget for displaying files and folders."""
     
@@ -206,7 +255,9 @@ class FileTree(Tree):
                     add_to_tree(branch, item)
                 else:
                     # Add file with an icon based on extension
-                    if item.suffix in ['.c', '.h']:
+                    if item.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
+                        icon = "🖼️"
+                    elif item.suffix in ['.c', '.h']:
                         icon = "📄"
                     elif item.suffix in ['.txt', '.md', '.info']:
                         icon = "📝"
@@ -224,33 +275,51 @@ class FileTree(Tree):
         if event.node and event.node.data:
             path = event.node.data.get('path', '')
             if path and os.path.isfile(path):
-                try:
-                    with open(path, 'r', encoding='utf-8', errors='replace') as f:
-                        content = f.read()
-                    # If it's a C file, add syntax highlighting hint
-                    if path.endswith('.c'):
-                        content = f"```c\n{content}\n```"
-                    elif path.endswith('.h'):
-                        content = f"```c\n{content}\n```"
-                    elif path.endswith('.mk') or 'Makefile' in path:
-                        content = f"```makefile\n{content}\n```"
-                    self.app.update_content(event.node.label, content)
-                except Exception as e:
-                    self.app.update_content(event.node.label, f"Error reading file: {str(e)}")
+                self._show_file_content(path, event.node.label)
             else:
-                # For directories, show some info about the contents
+                # For directories, show info about the contents
                 if os.path.isdir(path):
-                    try:
-                        num_files = len([f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))])
-                        num_dirs = len([d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))])
-                        content = f"# {os.path.basename(path)}\n\n"
-                        content += f"This directory contains:\n"
-                        content += f"- {num_files} files\n"
-                        content += f"- {num_dirs} directories\n\n"
-                        content += "Select a file to view its contents."
-                        self.app.update_content(event.node.label, content)
-                    except Exception as e:
-                        self.app.update_content(event.node.label, f"Error reading directory: {str(e)}")
+                    self._show_directory_content(path, event.node.label)
+
+    def _show_file_content(self, path: str, label: str) -> None:
+        """Show the content of a file."""
+        try:
+            file_ext = os.path.splitext(path)[1].lower()
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                # Escape any markup characters in the content
+                content = content.replace('[', '\\[').replace(']', '\\]')
+                self.app.update_content(label, content)
+        except UnicodeDecodeError:
+            # Handle binary files
+            self.app.update_content(label, f"Binary file: {os.path.basename(path)}\nSize: {os.path.getsize(path)} bytes")
+        except Exception as e:
+            self.app.update_content(label, f"Error reading file: {str(e)}")
+
+    def _show_directory_content(self, path: str, label: str) -> None:
+        """Show the content of a directory, prioritizing README.md if it exists."""
+        try:
+            # Check for README.md
+            readme_path = os.path.join(path, "README.md")
+            if os.path.isfile(readme_path):
+                self._show_file_content(readme_path, label)
+                return
+
+            # If no README.md, show directory contents
+            num_files = len([f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))])
+            num_dirs = len([d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))])
+            # Create console to capture the rendered output
+            console = Console(record=True, width=120)
+            content = f"# {os.path.basename(path)}\n\n"
+            content += f"This directory contains:\n"
+            content += f"- {num_files} files\n"
+            content += f"- {num_dirs} directories\n\n"
+            content += "Select a file to view its contents."
+            # Render as markdown for consistent formatting
+            console.print(Markdown(content))
+            self.app.update_content(label, console.export_text())
+        except Exception as e:
+            self.app.update_content(label, f"Error reading directory: {str(e)}")
 
     def on_key(self, event: events.Key) -> None:
         """Handle key events."""
@@ -263,12 +332,15 @@ class FileTree(Tree):
             event.prevent_default()
         elif event.key == "enter":
             if self.cursor_node:
-                if self.cursor_node.children:
-                    # Toggle expansion for directories
+                path = self.cursor_node.data.get('path', '')
+                if os.path.isdir(path):
+                    # For directories, toggle expansion and show README if available
                     if self.cursor_node.is_expanded:
                         self.cursor_node.collapse()
                     else:
                         self.cursor_node.expand()
+                    # Show directory content or README
+                    self._show_directory_content(path, self.cursor_node.label)
                 else:
                     # Switch focus to viewer for files
                     content = self.app.query_one(ContentView)
