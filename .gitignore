@@ -1,0 +1,12 @@
+# Exclude the entire assets directory
+assets/
+
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# IDE files
+.vscode/
+.idea/ 
+*.log
